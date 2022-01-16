@@ -1,0 +1,562 @@
+#!/bin/bash
+
+#
+#
+# Designed by Vlad Savchuk.
+#
+#
+
+# get all existing processes from /proc
+# [return: list of process IDs]
+function get_all_processes() {
+  find /proc -maxdepth 1 -regex '.*/[0-9]+' | cut -d/ -f3
+}
+
+# stores filtered processes
+RESULT=$(get_all_processes)
+
+# check if processes in list currently exists
+#   - param1: list of PIDs
+# [return: list of active process IDs]
+function get_active_processes() {
+  for i in $1; do
+    if [[ -f /proc/$i/stat ]]; then
+      echo "$i"
+    fi
+  done
+}
+
+# check if process with specified PID currently exists
+#   - param1: PID
+# [return: 0 - exist, not 0 - not exist]
+function is_exists() {
+  [[ -f /proc/$1/stat ]] && return
+}
+
+# get processes executed in current terminal (selection option: "--current-sid")
+#   - param1: list of PIDs
+# [return: list of PIDs with PPID which equals to current terminal PID]
+function get_current_SID() {
+  local PIDs
+  local current_SID
+
+  PIDs=$(get_active_processes "$1")
+  current_SID=$PPID
+
+  local SID
+  for i in $PIDs; do
+    SID=$(cut -d " " -f 6 /proc/"$i"/stat)
+    if [[ $SID -eq $current_SID ]]; then
+      echo "$i"
+    fi
+  done
+}
+
+# get processes with specified command name (selection option: "--cmd")
+#   - param1: list of PIDs
+#   - param2: command name
+# [return: list of PIDs with specified command name]
+function get_cmd() {
+  local PIDs
+  local cmd_name_query
+
+  PIDs=$(get_active_processes "$1")
+  cmd_name_query=$2
+
+  local proc_name
+  for i in $PIDs; do
+    proc_name=$(cut -d ' ' -f 2 /proc/"$i"/stat | tr -d '()')
+    if [[ $cmd_name_query == "$proc_name" ]]; then
+      echo "$i"
+    fi
+  done
+}
+
+# get processes with specified UID or username (selection option: "--User")
+#   - param1: list of PIDs
+#   - param2: UID or username
+# [return: list of PIDs with specified UID or username]
+function get_users_proc() {
+  local PIDs
+  local user
+
+  PIDs=$(get_active_processes "$1")
+  user=$2
+
+  local regular_exp='^[0-9]+$'
+  if [[ $user =~ $regular_exp ]]; then
+    if get_username_by_uid "$user"; then
+      for i in $PIDs; do
+        proc_uid=$(grep Uid /proc/"$i"/status | cut -f 2)
+        if [[ $user == "$proc_uid" ]]; then
+          echo "$i"
+        fi
+      done
+    fi
+  else
+    if user=$(get_uid_by_username "$user"); then
+      for i in $PIDs; do
+        proc_uid=$(grep Uid /proc/"$i"/status | cut -f 2)
+        if [[ $user == "$proc_uid" ]]; then
+          echo "$i"
+        fi
+      done
+    fi
+  fi
+}
+
+# get username by specified UID
+#   - param1: UID
+# [return: username]
+function get_username_by_uid() {
+  getent passwd "$1" | cut -d ':' -f 1
+}
+
+# get UID by specified username
+#   - param1: username
+# [return: UID]
+function get_uid_by_username() {
+  id -u "$1"
+}
+
+# get groupname by specified GID
+#   - param1: GID
+# [return: groupname]
+function get_groupname_by_gid() {
+  getent group "$1" | cut -d ':' -f 1
+}
+
+# get processes assigned with current tty by tty number (selection option: "--current-tty")
+#   - param1: list of PIDs
+# [return: list of PIDs assigned with current tty]
+function get_current_tty() {
+  # references
+  # https://github.com/torvalds/linux/blob/master/include/uapi/linux/kdev_t.h
+  # https://stackoverflow.com/questions/19598467/getting-minor-device-number-from-tty-nr-attribute-in-proc-pid-stat
+  # https://www.oreilly.com/library/view/linux-device-drivers/0596000081/ch03s02.html
+
+  local PIDs
+  local tty_path
+  local tty_maj
+  local tty_min
+
+  PIDs=$(get_active_processes "$1")
+  tty_path="$(tty)"
+  tty_maj=$(get_maj_from_stat "$tty_path")
+  tty_min=$(get_min_from_stat "$tty_path")
+
+  local proc_tty_nr
+  local proc_maj
+  local proc_min
+  for i in $PIDs; do
+    proc_tty_nr=$(cut -d ' ' -f 7 /proc/"$i"/stat)
+    proc_maj=$(get_maj_from_tty_nr "$proc_tty_nr")
+    proc_min=$(get_min_from_tty_nr "$proc_tty_nr")
+
+    if [[ $tty_maj == "$proc_maj" && $tty_min == "$proc_min" ]]; then
+      echo "$i"
+    fi
+  done
+}
+
+# get major device number for specified tty/pts name from stat and convert hex-->dec
+#   - param1: tty name ('/dev/tty*' or '/dev/pts/*')
+# [return: major device number of tty/pts]
+function get_maj_from_stat() {
+  echo $((16#$(stat "$1" --printf="%t")))
+}
+
+# get minor device number for specified tty/pts name from stat and convert hex-->dec
+#   - param1: tty name ('/dev/tty*' or '/dev/pts/*')
+# [return: minor device number of tty/pts]
+function get_min_from_stat() {
+  echo $((16#$(stat "$1" --printf="%T")))
+}
+
+# extract major device number from specified tty_nr and convert hex-->dec
+#   - param1: tty_nr (7th field in '/proc/[pid]/stat')
+# [return: major device number of tty/pts]
+function get_maj_from_tty_nr() {
+  echo $(($1 >> 8)) #MAJOR
+}
+
+# extract minor device number from specified tty_nr and convert hex-->dec
+#   - param1: tty_nr (7th field in '/proc/[pid]/stat')
+# [return: minor device number of tty/pts]
+function get_min_from_tty_nr() {
+  echo $(($1 & 0xff)) #MINOR
+}
+
+# get tty/pts name from specified major and minor numbers
+#   - param1: major device number
+#   - param2: minor device number
+# [return: tty/pts name ('/dev/tty*' or '/dev/pts/*')]
+function get_tty_by_maj_min() {
+  local maj=$1
+  local min=$2
+  local is_tty
+
+  is_tty="$(ls -l /dev/tty* | tr -s ' ' | grep "$maj, $min")"
+
+  if [[ ${#is_tty} -eq 0 ]]; then
+    echo "pts/$(ls -l /dev/pts/ | tr -s ' ' | grep "$maj, $min" | cut -d ' ' -f 10)"
+  else
+    echo "$(ls -l /dev/tty* | tr -s ' ' | grep "$maj, $min " | cut -d ' ' -f 10 | cut -d '/' -f 3)"
+  fi
+}
+
+# get processes which are not deamons by two conditions (selection option: "--no-deamons")
+#   - param1: list of PIDs
+# [return: list of PIDs which are not deamons]
+function get_no_deamons() {
+  # reference
+  # https://unix.stackexchange.com/questions/159964/how-to-check-whether-a-process-is-daemon-or-not
+  local PIDs
+
+  PIDs=$(get_active_processes "$1")
+
+  local proc_name
+  for i in $PIDs; do
+    proc_name=$(cut -d ' ' -f 2 /proc/"$i"/stat | tr -d '()')
+    if ! check_ppid "$i" || ! has_tty_attached "$i"; then
+      echo "$i"
+    fi
+  done
+}
+
+# check if PPID equal 1 (inherited from initd (systemd)) {first "probably deamon" condition}
+#   - param1: PPID
+# [return: 0 - inherited from process with PID=1, not 0 - inherited from another process]
+function check_ppid() {
+  local proc_PID
+  local proc_PPID
+  proc_PID=$1
+  proc_PPID="$(cut -d " " -f 4 /proc/"$proc_PID"/stat)"
+
+  [[ "$proc_PPID" == "1" ]] && return
+}
+
+# check if process tty_nr equal 0 (don't has attached terminal) {second "probably deamon" condition}
+#   - param1: tty_nr
+# [return: 0 - don't has attached terminal, not 0 - has attached terminal]
+function has_tty_attached() {
+  local proc_PID
+  local proc_TTY_NR
+  proc_PID=$1
+  proc_TTY_NR="$(cut -d " " -f 7 /proc/"$proc_PID"/stat)"
+
+  [[ "$proc_TTY_NR" == "0" ]] && return
+}
+
+# get fullname of process
+#   - param1: PID
+# [return: process name]
+function get_proc_cmd() {
+  local proc_PID
+  local proc_CMD
+  proc_PID=$1
+  proc_CMD="$(tr '\0' ' ' </proc/"$proc_PID"/cmdline)"
+
+  if [[ ! ${#proc_CMD} -eq 0 ]]; then
+    proc_CMD=$(tr '\0' ' ' </proc/"$proc_PID"/cmdline)
+
+    if [[ $proc_CMD == *" "* ]]; then
+      proc_CMD=$(echo "$proc_CMD" | cut -d " " -f 1)
+    fi
+
+    if [[ $proc_CMD == *"/"* ]]; then
+      proc_CMD=$(echo "$proc_CMD" | rev | cut -d "/" -f 1 | rev)
+    fi
+  else
+    proc_CMD=$(cut -d ' ' -f 2 /proc/"$proc_PID"/stat | tr -d '()')
+  fi
+
+  if [[ ${#proc_CMD} -lt 5 ]]; then
+    proc_CMD=$(cat /proc/"$proc_PID"/comm)
+  fi
+
+  echo "$proc_CMD"
+}
+
+NAMES=false
+NO_HEADERS=false
+
+# init default selection options (--select and --current-sid), if user not specified any custom options
+if [[ $# -eq 0 || $1 == "--" ]]; then
+  OPT_SELECT=true
+  RESULT=$(get_current_SID "$RESULT")
+fi
+
+# init selection options (--deselect and --current-sid), if user specified only --deselect option
+if [[ ($1 == "--deselect" || $1 == "--N") && $2 == "--" ]]; then
+  OPT_SELECT=false
+  RESULT=$(get_current_SID "$RESULT")
+fi
+
+# stores all specified by user format options
+FORMAT_OPTS=('PID' 'CMD')
+
+# parse selection options
+while [[ $# -gt 0 ]]; do
+  key="$1"
+  case $key in
+  -Y | --select)
+    OPT_SELECT=true
+    shift
+    ;;
+  -N | --deselect)
+    OPT_SELECT=false
+    shift
+    ;;
+  -S | --current-sid)
+    RESULT=$(get_current_SID "$RESULT")
+    shift
+    ;;
+  -C | --cmd)
+    OPT_CMD="$2"
+    RESULT=$(get_cmd "$RESULT" "$OPT_CMD")
+    shift
+    shift
+    ;;
+  -U | --User)
+    OPT_USER="$2"
+    RESULT=$(get_users_proc "$RESULT" "$OPT_USER")
+    shift
+    shift
+    ;;
+  -T | --current-tty)
+    RESULT=$(get_current_tty "$RESULT")
+    shift
+    ;;
+  -D | --no-deamons)
+    RESULT=$(get_no_deamons "$RESULT")
+    shift
+    ;;
+  --)
+    shift
+    FORMAT_OPTS=()
+    # parse format options
+    while [[ $# -gt 0 ]]; do
+      key="$1"
+      case $key in
+      -d | --default)
+        FORMAT_OPTS+=('PID')
+        FORMAT_OPTS+=('CMD')
+        shift
+        ;;
+      -m | --mem)
+        FORMAT_OPTS+=('PID')
+        FORMAT_OPTS+=('SIZE')
+        FORMAT_OPTS+=('RSSIZE')
+        FORMAT_OPTS+=('SHSSIZE')
+        FORMAT_OPTS+=('TSSIZE')
+        FORMAT_OPTS+=('DSSIZE')
+        FORMAT_OPTS+=('SSSIZE')
+        shift
+        ;;
+      -p | --pid)
+        FORMAT_OPTS+=('PID')
+        shift
+        ;;
+      -P | --ppid)
+        FORMAT_OPTS+=('PPID')
+        shift
+        ;;
+      -C | --cmd)
+        FORMAT_OPTS+=('CMD')
+        shift
+        ;;
+      -U | --User)
+        FORMAT_OPTS+=('UID')
+        shift
+        ;;
+      -G | --Group)
+        FORMAT_OPTS+=('GID')
+        shift
+        ;;
+      -T | --ttynum)
+        FORMAT_OPTS+=('TTYNUM')
+        shift
+        ;;
+      -c | --path)
+        FORMAT_OPTS+=('PATH')
+        shift
+        ;;
+      --starttime)
+        FORMAT_OPTS+=('STARTTIME')
+        shift
+        ;;
+      --vmstk)
+        FORMAT_OPTS+=('VMSTK')
+        shift
+        ;;
+      --sigcgt)
+        FORMAT_OPTS+=('SIGCGT')
+        shift
+        ;;
+      -n | --names)
+        NAMES=true
+        shift
+        ;;
+      --no-headers)
+        NO_HEADERS=true
+        shift
+        ;;
+      *)
+        printf "myps: invalid option '%s'.\n" "$key"
+        printf "Try 'man myps' for more information.\n"
+        exit 1
+        ;;
+      esac
+    done
+    ;;
+  *)
+    printf "myps: invalid option '%s'.\n" "$key"
+    printf "Try 'man myps' for more information.\n"
+    exit 1
+    ;;
+  esac
+done
+
+# associative array for storing printed columns width
+declare -A COLS_WIDTH=()
+COLS_WIDTH['PID']=10
+COLS_WIDTH['CMD']=35
+COLS_WIDTH['PATH']=30
+COLS_WIDTH['PPID']=10
+COLS_WIDTH['TTYNUM']=10
+COLS_WIDTH['UID']=6
+COLS_WIDTH['GID']=6
+COLS_WIDTH['SIZE']=8
+COLS_WIDTH['RSSIZE']=8
+COLS_WIDTH['SHSSIZE']=8
+COLS_WIDTH['TSSIZE']=8
+COLS_WIDTH['DSSIZE']=8
+COLS_WIDTH['SSSIZE']=8
+COLS_WIDTH['STARTTIME']=10
+COLS_WIDTH['VMSTK']=10
+COLS_WIDTH['SIGCGT']=20
+
+# print columns headers
+# [return: exit code]
+function print_headers() {
+  for opt in "${FORMAT_OPTS[@]}"; do
+    printf "\e[1m%-${COLS_WIDTH["$opt"]}s\t\e[0m" "$opt"
+  done
+  printf "\n"
+}
+
+# stores option names, which has two presentation forms (long(name) and short(number))
+OPTS_WITH_NAMES=('UID' 'GID' 'TTYNUM')
+
+# extract specified in FORMAT_OPTS values for PID and print formatted row of this values
+#   - param1: PID
+# [return: exit code]
+function print_proc() {
+  if ! is_exists "$1"; then
+    return
+  fi
+
+  declare -A PROC_DETAILS=()
+
+  for opt in "${FORMAT_OPTS[@]}"; do
+    case $opt in
+    PID)
+      PROC_DETAILS['PID']=$(cut -d " " -f 1 /proc/"$1"/stat)
+      ;;
+    CMD)
+      PROC_DETAILS['CMD']=$(get_proc_cmd "$1")
+      ;;
+    PATH)
+      path_var=$(tr '\0' ' ' </proc/"$1"/cmdline)
+      if [ -z "${path_var}" ]; then
+        PROC_DETAILS['PATH']=$(get_proc_cmd "$1")
+      else
+        PROC_DETAILS['PATH']="$path_var"
+      fi
+      ;;
+    PPID)
+      PROC_DETAILS['PPID']=$(grep PPid /proc/"$i"/status | tr -s ' ' | cut -f2)
+      ;;
+    TTYNUM)
+      PROC_DETAILS['TTYNUM']=$(cut -d ' ' -f 7 /proc/"$i"/stat)
+      PROC_DETAILS['TTYMAJOR']=$(get_maj_from_tty_nr "${PROC_DETAILS['TTYNUM']}")
+      PROC_DETAILS['TTYMINOR']=$(get_min_from_tty_nr "${PROC_DETAILS['TTYNUM']}")
+      if [[ ${PROC_DETAILS['TTYNUM']} -eq 0 ]]; then
+        PROC_DETAILS['TTYNUM_name']="Not attached"
+      else
+        PROC_DETAILS['TTYNUM_name']=$(get_tty_by_maj_min "${PROC_DETAILS['TTYMAJOR']}" "${PROC_DETAILS['TTYMINOR']}")
+      fi
+      ;;
+    UID)
+      PROC_DETAILS['UID']=$(grep Uid /proc/"$1"/status | cut -f 2)
+      PROC_DETAILS['UID_name']=$(get_username_by_uid "${PROC_DETAILS['UID']}")
+      ;;
+    GID)
+      PROC_DETAILS['GID']=$(grep Gid /proc/"$i"/status | cut -f 2)
+      PROC_DETAILS['GID_name']=$(get_groupname_by_gid "${PROC_DETAILS['GID']}")
+      ;;
+    SIZE)
+      PROC_DETAILS['SIZE']=$(cut -d ' ' -f 1 /proc/"$i"/statm)
+      ;;
+    RSSIZE)
+      rssize=$(grep VmRSS /proc/"$i"/status | tr -s ' ' | cut -f2 -d ' ')
+      if [ -z "${rssize}" ]; then
+        PROC_DETAILS['RSSIZE']="0"
+      else
+        PROC_DETAILS['RSSIZE']="$rssize"
+      fi
+      ;;
+    SHSSIZE)
+      PROC_DETAILS['SHSSIZE']=$(cut -d ' ' -f 3 /proc/"$i"/statm)
+      ;;
+    TSSIZE)
+      PROC_DETAILS['TSSIZE']=$(cut -d ' ' -f 4 /proc/"$i"/statm)
+      ;;
+    DSSIZE)
+      PROC_DETAILS['DSSIZE']=$(cut -d ' ' -f 6 /proc/"$i"/statm)
+      ;;
+    SSSIZE)
+      PROC_DETAILS['SSSIZE']=$(cut -d ' ' -f 36 /proc/"$i"/stat)
+      ;;
+    STARTTIME)
+      PROC_DETAILS['STARTTIME']=$(cut -d ' ' -f 22 /proc/"$i"/stat)
+      ;;
+    VMSTK)
+      vmstk=$(grep VmStk /proc/"$i"/status | tr -s ' ' | cut -f2 | tr -d ' ')
+      if [ -z "${vmstk}" ]; then
+        PROC_DETAILS['VMSTK']="-"
+      else
+        PROC_DETAILS['VMSTK']="$vmstk"
+      fi
+      ;;
+    SIGCGT)
+      PROC_DETAILS['SIGCGT']=$(grep SigCgt /proc/"$i"/status | cut -f2)
+      ;;
+    esac
+
+    if $NAMES && [[ "${OPTS_WITH_NAMES[*]}" =~ ${opt} ]]; then
+      printf "%-${COLS_WIDTH["$opt"]}s\t" "${PROC_DETAILS["$opt""_name"]}"
+    else
+      printf "%-${COLS_WIDTH["$opt"]}s\t" "${PROC_DETAILS["$opt"]}"
+    fi
+  done
+  printf "\n"
+}
+
+# check "--no-headers" option
+if ! $NO_HEADERS; then
+  print_headers
+fi
+
+# reverse RESULT array, if "--deselect" option specified
+if ! $OPT_SELECT; then
+  all=$(get_active_processes "$(get_all_processes)")
+  RESULT="$(echo "${all[@]}" "${RESULT[@]}" | tr ' ' '\n' | sort -n | uniq -u)"
+fi
+
+# print all processes from RESULT array
+RESULT=$(get_active_processes "$RESULT")
+for i in $RESULT; do
+  print_proc "$i"
+done
