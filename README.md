@@ -6,6 +6,7 @@
 2. Install by running: `sudo apt-get install ./myps_[version]_all.deb`.
 
 ## Usage
+Use `man myps` for more info.
 ### Select options
 You can get info about processes, which are:
 - executed in current terminal (selection option: `--current-sid`)
